@@ -4,10 +4,12 @@ package main
 
 import (
 	"fmt"
+	"io/ioutil"
 	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 
 	"github.com/opencontainers/runc/libcontainer"
@@ -287,12 +289,41 @@ func (r *runner) run(config *specs.Process) (int, error) {
 		process.ExtraFiles = append(process.ExtraFiles, r.listenFDs...)
 	}
 	baseFd := 3 + len(process.ExtraFiles)
-	for i := baseFd; i < baseFd+r.preserveFDs; i++ {
-		_, err = os.Stat(fmt.Sprintf("/proc/self/fd/%d", i))
+	currentFDs, err := ioutil.ReadDir("/proc/self/fd")
+	if err != nil {
+		return -1, err
+	}
+	sort.Slice(currentFDs, func(i, j int) bool {
+		fdi, _ := strconv.Atoi(currentFDs[i].Name())
+		fdj, _ := strconv.Atoi(currentFDs[j].Name())
+		return fdi < fdj
+	})
+	fmt.Println("Number of current FDs found: ", len(currentFDs))
+	fmt.Println("Current FDs:")
+	for i, _ := range currentFDs {
+		fmt.Println("  ", currentFDs[i].Name())
+	}
+	fmt.Println("\n", "Removing unreachable FDs...")
+	for i, file := range currentFDs {
+		_, err := os.Stat("/proc/self/fd/" + file.Name())
 		if err != nil {
-			return -1, errors.Wrapf(err, "please check that preserved-fd %d (of %d) is present", i-baseFd, r.preserveFDs)
+			currentFDs = append(currentFDs[:i], currentFDs[i+1:]...)
 		}
-		process.ExtraFiles = append(process.ExtraFiles, os.NewFile(uintptr(i), "PreserveFD:"+strconv.Itoa(i)))
+	}
+	fmt.Println("Filtered FDs:")
+	for i, _ := range currentFDs {
+		fmt.Println("  ", currentFDs[i].Name())
+	}
+	for i := baseFd; i < baseFd+r.preserveFDs && i < len(currentFDs); i++ {
+		fd := currentFDs[i].Name()
+		_, err = os.Stat(fmt.Sprintf("/proc/self/fd/%s", fd))
+		if err != nil {
+			fmt.Println("Could not stat ", fmt.Sprintf("/proc/self/fd/%s", fd))
+			continue
+		}
+		fmt.Println("Preserving FD ", fd)
+		fd_int, _ := strconv.Atoi(fd)
+		process.ExtraFiles = append(process.ExtraFiles, os.NewFile(uintptr(fd_int), "PreserveFD:"+fd))
 	}
 	rootuid, err := r.container.Config().HostRootUID()
 	if err != nil {
